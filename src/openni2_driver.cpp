@@ -52,7 +52,11 @@ OpenNI2Driver::OpenNI2Driver(ros::NodeHandle& n, ros::NodeHandle& pnh) :
     ir_subscribers_(false),
     color_subscribers_(false),
     depth_subscribers_(false),
-    depth_raw_subscribers_(false)
+    depth_raw_subscribers_(false),
+    color_trigger_(0),
+    depth_trigger_(0),
+    depth_raw_trigger_(0),
+    ir_trigger_(0)
 {
 
   genVideoModeTableMap();
@@ -88,6 +92,19 @@ void OpenNI2Driver::advertiseROSTopics()
   image_transport::ImageTransport depth_it(depth_nh);
   ros::NodeHandle depth_raw_nh(nh_, "depth");
   image_transport::ImageTransport depth_raw_it(depth_raw_nh);
+  //Triggered versions
+  ros::NodeHandle triggered_nh(nh_,"triggered");
+  ros::NodeHandle color_triggered_nh(triggered_nh, "rgb");
+  image_transport::ImageTransport color_triggered_it(color_triggered_nh);
+  ros::NodeHandle ir_triggered_nh(triggered_nh, "ir");
+  image_transport::ImageTransport ir_triggered_it(ir_triggered_nh);
+  ros::NodeHandle depth_triggered_nh(triggered_nh, "depth");
+  image_transport::ImageTransport depth_triggered_it(depth_triggered_nh);
+  ros::NodeHandle depth_raw_triggered_nh(triggered_nh, "depth");
+  image_transport::ImageTransport depth_raw_triggered_it(depth_raw_triggered_nh);
+  ros::NodeHandle depth_registered_triggered_nh(triggered_nh, "depth_registered");
+
+
   // Advertise all published topics
 
   // Prevent connection callbacks from executing until we've set all the publishers. Otherwise
@@ -102,6 +119,8 @@ void OpenNI2Driver::advertiseROSTopics()
     image_transport::SubscriberStatusCallback itssc = boost::bind(&OpenNI2Driver::colorConnectCb, this);
     ros::SubscriberStatusCallback rssc = boost::bind(&OpenNI2Driver::colorConnectCb, this);
     pub_color_ = color_it.advertiseCamera("image", 1, itssc, itssc, rssc, rssc);
+    pub_color_triggered_ = color_triggered_it.advertiseCamera("image", 1, itssc, itssc, rssc, rssc);
+    sub_color_trigger_ = color_triggered_nh.subscribe("trigger",100,&OpenNI2Driver::colorTriggerCallback,this);
   }
 
   if (device_->hasIRSensor())
@@ -109,6 +128,8 @@ void OpenNI2Driver::advertiseROSTopics()
     image_transport::SubscriberStatusCallback itssc = boost::bind(&OpenNI2Driver::irConnectCb, this);
     ros::SubscriberStatusCallback rssc = boost::bind(&OpenNI2Driver::irConnectCb, this);
     pub_ir_ = ir_it.advertiseCamera("image", 1, itssc, itssc, rssc, rssc);
+    pub_ir_triggered_ = ir_triggered_it.advertiseCamera("image", 1, itssc, itssc, rssc, rssc);
+    sub_ir_trigger_ = ir_triggered_nh.subscribe("trigger",100,&OpenNI2Driver::irTriggerCallback,this);
   }
 
   if (device_->hasDepthSensor())
@@ -117,6 +138,12 @@ void OpenNI2Driver::advertiseROSTopics()
     ros::SubscriberStatusCallback rssc = boost::bind(&OpenNI2Driver::depthConnectCb, this);
     pub_depth_raw_ = depth_it.advertiseCamera("image_raw", 1, itssc, itssc, rssc, rssc);
     pub_depth_ = depth_raw_it.advertiseCamera("image", 1, itssc, itssc, rssc, rssc);
+    pub_depth_raw_triggered_ = depth_triggered_it.advertiseCamera("image_raw", 1, itssc, itssc, rssc, rssc);
+    pub_depth_triggered_ = depth_raw_triggered_it.advertiseCamera("image", 1, itssc, itssc, rssc, rssc);
+    sub_depth_trigger_ = depth_triggered_nh.subscribe("trigger",100,&OpenNI2Driver::depthTriggerCallback,this);
+    sub_depth_raw_trigger_ = depth_raw_triggered_nh.subscribe("trigger",100,&OpenNI2Driver::depthRawTriggerCallback,this);
+    if(device_->hasColorSensor())
+      sub_depth_registered_trigger_ = depth_registered_triggered_nh.subscribe("trigger",100,&OpenNI2Driver::depthRegisteredTriggerCallback,this);
   }
 
   ////////// CAMERA INFO MANAGER
@@ -302,8 +329,11 @@ void OpenNI2Driver::colorConnectCb()
   boost::lock_guard<boost::mutex> lock(connect_mutex_);
 
   color_subscribers_ = pub_color_.getNumSubscribers() > 0;
+  color_triggered_subscribers_ = pub_color_triggered_.getNumSubscribers() > 0;
 
-  if (color_subscribers_ && !device_->isColorStreamStarted())
+  bool need_color = color_subscribers_ || color_triggered_subscribers_;
+
+  if ( need_color && !device_->isColorStreamStarted())
   {
     // Can't stream IR and RGB at the same time. Give RGB preference.
     if (device_->isIRStreamStarted())
@@ -319,13 +349,13 @@ void OpenNI2Driver::colorConnectCb()
     device_->startColorStream();
 
   }
-  else if (!color_subscribers_ && device_->isColorStreamStarted())
+  else if (!need_color && device_->isColorStreamStarted())
   {
     ROS_INFO("Stopping color stream.");
     device_->stopColorStream();
 
     // Start IR if it's been blocked on RGB subscribers
-    bool need_ir = pub_ir_.getNumSubscribers() > 0;
+    bool need_ir = ((pub_ir_.getNumSubscribers() > 0) || (pub_ir_triggered_.getNumSubscribers() > 0));
     if (need_ir && !device_->isIRStreamStarted())
     {
       device_->setIRFrameCallback(boost::bind(&OpenNI2Driver::newIRFrameCallback, this, _1));
@@ -342,8 +372,10 @@ void OpenNI2Driver::depthConnectCb()
 
   depth_subscribers_ = pub_depth_.getNumSubscribers() > 0;
   depth_raw_subscribers_ = pub_depth_raw_.getNumSubscribers() > 0;
+  depth_triggered_subscribers_ = pub_depth_triggered_.getNumSubscribers() > 0;
+  depth_raw_triggered_subscribers_ = pub_depth_raw_triggered_.getNumSubscribers() > 0;
 
-  bool need_depth = depth_subscribers_ || depth_raw_subscribers_;
+  bool need_depth = depth_subscribers_ || depth_raw_subscribers_ || depth_triggered_subscribers_ || depth_raw_triggered_subscribers_;
 
   if (need_depth && !device_->isDepthStreamStarted())
   {
@@ -364,8 +396,11 @@ void OpenNI2Driver::irConnectCb()
   boost::lock_guard<boost::mutex> lock(connect_mutex_);
 
   ir_subscribers_ = pub_ir_.getNumSubscribers() > 0;
+  ir_triggered_subscribers_ = pub_ir_triggered_.getNumSubscribers() > 0;
 
-  if (ir_subscribers_ && !device_->isIRStreamStarted())
+  bool need_ir = ir_subscribers_ || ir_triggered_subscribers_;
+
+  if (need_ir && !device_->isIRStreamStarted())
   {
     // Can't stream IR and RGB at the same time
     if (device_->isColorStreamStarted())
@@ -380,7 +415,7 @@ void OpenNI2Driver::irConnectCb()
       device_->startIRStream();
     }
   }
-  else if (!ir_subscribers_ && device_->isIRStreamStarted())
+  else if (!need_ir && device_->isIRStreamStarted())
   {
     ROS_INFO("Stopping IR stream.");
     device_->stopIRStream();
@@ -389,44 +424,61 @@ void OpenNI2Driver::irConnectCb()
 
 void OpenNI2Driver::newIRFrameCallback(sensor_msgs::ImagePtr image)
 {
-  if ((++data_skip_ir_counter_)%data_skip_==0)
-  {
-    data_skip_ir_counter_ = 0;
 
-    if (ir_subscribers_)
+  if ((++data_skip_ir_counter_)%data_skip_==0 || ir_trigger_ > 0)
+  {
+    if (ir_subscribers_ || ir_triggered_subscribers_)
     {
       image->header.frame_id = ir_frame_id_;
       image->header.stamp = image->header.stamp + ir_time_offset_;
 
-      pub_ir_.publish(image, getIRCameraInfo(image->width, image->height, image->header.stamp));
+      if(ir_subscribers_ && data_skip_ir_counter_%data_skip_==0)
+      {
+        pub_ir_.publish(image, getIRCameraInfo(image->width, image->height, image->header.stamp));
+        data_skip_ir_counter_ = 0;
+      }
+      if(ir_triggered_subscribers_ && ir_trigger_ > 0)
+      {
+        pub_ir_triggered_.publish(image, getIRCameraInfo(image->width, image->height, image->header.stamp));
+        boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+        ir_trigger_--;
+      }
     }
   }
 }
 
 void OpenNI2Driver::newColorFrameCallback(sensor_msgs::ImagePtr image)
 {
-  if ((++data_skip_color_counter_)%data_skip_==0)
+  if ((++data_skip_color_counter_)%data_skip_==0 || color_trigger_ > 0)
   {
-    data_skip_color_counter_ = 0;
-
-    if (color_subscribers_)
+    if (color_subscribers_ || color_triggered_subscribers_)
     {
       image->header.frame_id = color_frame_id_;
       image->header.stamp = image->header.stamp + color_time_offset_;
 
-      pub_color_.publish(image, getColorCameraInfo(image->width, image->height, image->header.stamp));
+      if(color_subscribers_ && data_skip_color_counter_%data_skip_==0)
+      {
+        data_skip_color_counter_ = 0;
+        pub_color_.publish(image, getColorCameraInfo(image->width, image->height, image->header.stamp));
+      }
+      if(color_triggered_subscribers_ && color_trigger_ > 0)
+      {
+        pub_color_triggered_.publish(image, getColorCameraInfo(image->width, image->height, image->header.stamp));
+        boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+        color_trigger_--;
+      }
     }
   }
 }
 
 void OpenNI2Driver::newDepthFrameCallback(sensor_msgs::ImagePtr image)
 {
-  if ((++data_skip_depth_counter_)%data_skip_==0)
+  if ((++data_skip_depth_counter_)%data_skip_==0 || depth_trigger_ > 0 || depth_raw_trigger_ > 0)
   {
 
     data_skip_depth_counter_ = 0;
 
-    if (depth_raw_subscribers_||depth_subscribers_)
+    if (depth_raw_subscribers_ || depth_subscribers_ || depth_raw_triggered_subscribers_ || depth_triggered_subscribers_)
     {
       image->header.stamp = image->header.stamp + depth_time_offset_;
 
@@ -458,15 +510,29 @@ void OpenNI2Driver::newDepthFrameCallback(sensor_msgs::ImagePtr image)
         cam_info = getDepthCameraInfo(image->width,image->height, image->header.stamp);
       }
 
-      if (depth_raw_subscribers_)
+      if(data_skip_depth_counter_%data_skip_==0)
       {
-        pub_depth_raw_.publish(image, cam_info);
+        data_skip_depth_counter_ = 0;
+        if (depth_raw_subscribers_ )
+        {
+          pub_depth_raw_.publish(image, cam_info);
+        }
+        if (depth_subscribers_)
+        {
+          sensor_msgs::ImageConstPtr floating_point_image = rawToFloatingPointConversion(image);
+          pub_depth_.publish(floating_point_image, cam_info);
+        }
       }
-
-      if (depth_subscribers_ )
-      {
-        sensor_msgs::ImageConstPtr floating_point_image = rawToFloatingPointConversion(image);
-        pub_depth_.publish(floating_point_image, cam_info);
+      if(depth_raw_trigger_ > 0 && depth_raw_triggered_subscribers_){
+          pub_depth_raw_triggered_.publish(image, cam_info);
+          boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+          depth_raw_trigger_--;
+      }
+      if(depth_trigger_ > 0 && depth_triggered_subscribers_){
+          sensor_msgs::ImageConstPtr floating_point_image = rawToFloatingPointConversion(image);
+          pub_depth_triggered_.publish(floating_point_image, cam_info);
+          boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+          depth_trigger_--;
       }
     }
   }
@@ -879,6 +945,37 @@ sensor_msgs::ImageConstPtr OpenNI2Driver::rawToFloatingPointConversion(sensor_ms
   }
 
   return new_image;
+}
+
+void OpenNI2Driver::colorTriggerCallback(const std_msgs::Int32::ConstPtr& msg)
+{
+  boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+  color_trigger_ += msg->data;
+}
+
+void OpenNI2Driver::depthTriggerCallback(const std_msgs::Int32::ConstPtr& msg)
+{
+  boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+  depth_trigger_ += msg->data;
+}
+
+void OpenNI2Driver::depthRawTriggerCallback(const std_msgs::Int32::ConstPtr& msg)
+{
+  boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+  depth_raw_trigger_ += msg->data;
+}
+
+void OpenNI2Driver::depthRegisteredTriggerCallback(const std_msgs::Int32::ConstPtr& msg)
+{
+  boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+  depth_raw_trigger_ += msg->data;
+  color_trigger_ += msg->data;
+}
+
+void OpenNI2Driver::irTriggerCallback(const std_msgs::Int32::ConstPtr& msg)
+{
+  boost::lock_guard<boost::mutex> lock(trigger_mutex_);
+  ir_trigger_ += msg->data;
 }
 
 }

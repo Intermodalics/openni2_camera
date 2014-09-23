@@ -38,6 +38,7 @@
 #include <boost/function.hpp>
 
 #include <sensor_msgs/Image.h>
+#include <std_msgs/Int32.h>
 
 #include <dynamic_reconfigure/server.h>
 #include <openni2_camera/OpenNI2Config.h>
@@ -119,7 +120,25 @@ private:
   image_transport::CameraPublisher pub_depth_;
   image_transport::CameraPublisher pub_depth_raw_;
   image_transport::CameraPublisher pub_ir_;
+
+  image_transport::CameraPublisher pub_color_triggered_;
+  image_transport::CameraPublisher pub_depth_triggered_;
+  image_transport::CameraPublisher pub_depth_raw_triggered_;
+  image_transport::CameraPublisher pub_ir_triggered_;
+
   ros::Publisher pub_projector_info_;
+  ros::Subscriber sub_color_trigger_;
+  ros::Subscriber sub_depth_trigger_;
+  ros::Subscriber sub_depth_raw_trigger_;
+  ros::Subscriber sub_depth_registered_trigger_;
+  ros::Subscriber sub_ir_trigger_;
+
+  boost::mutex trigger_mutex_;
+  void colorTriggerCallback(const std_msgs::Int32::ConstPtr& msg);
+  void depthTriggerCallback(const std_msgs::Int32::ConstPtr& msg);
+  void depthRawTriggerCallback(const std_msgs::Int32::ConstPtr& msg);
+  void depthRegisteredTriggerCallback(const std_msgs::Int32::ConstPtr& msg);
+  void irTriggerCallback(const std_msgs::Int32::ConstPtr& msg);
 
   /** \brief Camera info manager objects. */
   boost::shared_ptr<camera_info_manager::CameraInfoManager> color_info_manager_, ir_info_manager_;
@@ -162,6 +181,17 @@ private:
   bool color_subscribers_;
   bool depth_subscribers_;
   bool depth_raw_subscribers_;
+
+  bool ir_triggered_subscribers_;
+  bool color_triggered_subscribers_;
+  bool depth_triggered_subscribers_;
+  bool depth_raw_triggered_subscribers_;
+
+  int color_trigger_;
+  int depth_trigger_;
+  int depth_raw_trigger_;
+  int depth_registered_trigger_;
+  int ir_trigger_;
 
   bool use_device_time_;
 
