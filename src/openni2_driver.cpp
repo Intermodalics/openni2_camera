@@ -968,7 +968,10 @@ void OpenNI2Driver::depthRawTriggerCallback(const std_msgs::Int32::ConstPtr& msg
 void OpenNI2Driver::depthRegisteredTriggerCallback(const std_msgs::Int32::ConstPtr& msg)
 {
   boost::lock_guard<boost::mutex> lock(trigger_mutex_);
-  depth_raw_trigger_ += msg->data;
+  if(depth_registration_)
+      depth_trigger_ += msg->data;
+  else
+      depth_raw_trigger_ += msg->data;
   color_trigger_ += msg->data;
 }
 
